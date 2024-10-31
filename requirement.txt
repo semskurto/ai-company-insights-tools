@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+transformers
+fpdf
+tqdm
+torch  # Not specifying exact version; install appropriate version for your environment (e.g., CPU or GPU).
