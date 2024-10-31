@@ -1,184 +1,117 @@
+from fpdf import FPDF
+from transformers import pipeline
 import requests
 from bs4 import BeautifulSoup
 import re
-from transformers import pipeline
-import os
-from fpdf import FPDF
+from tqdm import tqdm
+
 
 class AIProspectResearcher:
     def __init__(self):
+        # Initialize summarizer model
         self.setup_ai_model()
 
     def setup_ai_model(self):
-        # Set up an AI model for summarization using Hugging Face's transformers library
+        """Set up the AI summarization model."""
         try:
+            # Using a summarization model from Hugging Face
             self.summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
         except ModuleNotFoundError as e:
             print("Error: 'transformers' module not found. Please install it using 'pip install transformers'.", str(e))
             self.summarizer = None
 
     def scrape_website(self, url: str):
-        """Scrape website content including title, description, and additional info like contact details."""
+        """Scrape the website to get the title, description, and relevant text."""
         try:
             response = requests.get(url)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Extract general content
-            content = {
-                'title': soup.title.string if soup.title else '',
-                'description': soup.find('meta', attrs={'name': 'description'})['content'] if soup.find('meta', attrs={'name': 'description'}) else '',
-                'text': ' '.join([p.get_text() for p in soup.find_all('p')])
-            }
+            # Collecting title and meta description
+            title = soup.find('title').get_text() if soup.find('title') else "No title found"
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            description = meta_desc['content'] if meta_desc else "No meta description found"
             
-            # Extract additional information (year founded, goals, etc.)
-            additional_info = {
-                'year_founded': self.extract_year_founded(soup),
-                'goals': self.extract_goals(soup),
-                'objectives': self.extract_objectives(soup),
-                'innovations': self.extract_innovations(soup),
-                'contact_info': self.extract_contact_info(soup)
+            # Collecting additional main content (h1, h2, p tags)
+            content = ''
+            for tag in soup.find_all(['h1', 'h2', 'p']):
+                content += tag.get_text(separator=" ", strip=True) + ' '
+
+            return {
+                "title": title,
+                "description": description,
+                "content": content
             }
-            print(content)
-            
-            return content, additional_info
-        
-        except requests.exceptions.RequestException as e:
-            print(f"Error scraping website: {str(e)}")
-            return {}, {}
-
-    def extract_year_founded(self, soup):
-        """Extract the year the company was founded."""
-        paragraphs = soup.find_all('p')
-        for p in paragraphs:
-            text = p.get_text().lower()
-            if 'founded' in text:
-                match = re.search(r'(\d{4})', text)
-                if match:
-                    return match.group(0)
-        return "Not available"
-
-    def extract_goals(self, soup):
-        """Extract company goals from the webpage."""
-        return self.extract_keyword_sentences(soup, ['goal', 'mission'])
-
-    def extract_objectives(self, soup):
-        """Extract company objectives from the webpage."""
-        return self.extract_keyword_sentences(soup, ['objective', 'vision'])
-
-    def extract_innovations(self, soup):
-        """Extract company innovations from the webpage."""
-        return self.extract_keyword_sentences(soup, ['innovation', 'new technology'])
-
-    def extract_contact_info(self, soup):
-        """Extract contact information (email) from the webpage."""
-        contact_info = []
-        email_links = soup.find_all('a', href=re.compile(r'mailto'))
-        for link in email_links:
-            contact_info.append(link.get('href').replace('mailto:', '').strip())
-        
-        return ', '.join(contact_info) if contact_info else "Not available"
-
-    def extract_keyword_sentences(self, soup, keywords):
-        """Helper function to extract sentences containing specific keywords."""
-        sentences = []
-        paragraphs = soup.find_all('p')
-        for p in paragraphs:
-            text = p.get_text()
-            if any(keyword in text.lower() for keyword in keywords):
-                sentences.append(text.strip())
-        
-        return sentences if sentences else ["Not available"]
-
-    def generate_summary(self, content: dict, additional_info: dict):
-        """Generate a summary using an LLM based on scraped content and details. Explains the company overview, target, innovations, etc. Also who is customer and what is the company's goal?"""
-        if not self.summarizer:
-            print("Summarizer model is not available.")
-            return "No summary available."
-
-        prompt = f"""
-        Company Overview: {content['description']}. 
-        Year Founded: {additional_info['year_founded']}. 
-        Goals: {'; '.join(additional_info['goals'])}. 
-        Objectives: {'; '.join(additional_info['objectives'])}. 
-        Innovations: {'; '.join(additional_info['innovations'])}. 
-        Contact Information: {additional_info['contact_info']}.
-        """
-        
-        try:
-            summary = self.summarizer(prompt, max_length=200)[0]['summary_text']
-            return summary
         except Exception as e:
-            print(f"Error generating summary: {str(e)}")
-            return prompt  # Fallback to raw prompt if summarization fails
+            print(f"Error while scraping {url}: {str(e)}")
+            return None
 
-    def generate_report(self, analysis: dict, output_path: str):
-        """Generate a PDF report based on analysis data."""
+    def summarize_content(self, content: str, max_chunk_length=500):
+        """Summarize content in chunks, dynamically adjusting max_length with progress feedback."""
+        if not self.summarizer:
+            return "Summarizer model is not available."
+        
+        chunks = [content[i:i + max_chunk_length] for i in range(0, len(content), max_chunk_length)]
+        summarized_text = ''
+        
+        print("Summarizing content... Please wait.")
+        for chunk in tqdm(chunks, desc="Progress", unit="chunk"):
+            input_length = len(chunk.split())
+            max_len = min(120, int(input_length * 0.6))  # Max length: 60% of input, capped at 120
+            min_len = min(30, int(input_length * 0.3))   # Min length: 30% of input, capped at 30
+
+            summary = self.summarizer(chunk, max_length=max_len, min_length=min_len, do_sample=False)
+            summarized_text += summary[0]['summary_text'] + ' '
+
+        return summarized_text.strip()
+
+    def create_pdf(self, data, filename="Prospect_Report.pdf"):
+        """Create a styled PDF with summarized content."""
         pdf = FPDF()
-        
-        # Add fonts (assuming Arial is available as per previous setup)
-        pdf.add_font('Arial', '', os.path.join('fonts', 'Arial.ttf'), uni=True)
-        
         pdf.add_page()
 
-        # Title
-        pdf.set_font('Arial', 'B', 16)
-        pdf.cell(0, 10, f"Prospect Research: {analysis['company_name']}", ln=True)
+        # Title section
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 10, f"Prospect Report: {data['title']}", ln=True, align='C')
 
-        # Summary Section
-        pdf.set_font('Arial', '', 12)
-        pdf.multi_cell(0, 10, f"Summary:\n{analysis['summary']}")
+        # Description section
+        pdf.set_font("Arial", "I", 12)
+        pdf.cell(0, 10, "Website Description:", ln=True)
+        pdf.set_font("Arial", "", 12)
+        pdf.multi_cell(0, 10, data['description'], align='L')
 
-        # Additional Information Section
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(0, 10, "Additional Information:", ln=True)
+        # Summarized Content section
+        pdf.set_font("Arial", "I", 12)
+        pdf.cell(0, 10, "Summarized Content:", ln=True)
+        pdf.set_font("Arial", "", 12)
+        pdf.multi_cell(0, 10, data['summarized_content'], align='L')
 
-        pdf.set_font('Arial', '', 12)
+        # Footer with page number
+        pdf.set_y(-15)
+        pdf.set_font("Arial", "I", 8)
+        pdf.cell(0, 10, f"Page {pdf.page_no()}", 0, 0, 'C')
+
+        pdf.output(filename)
+        return filename
+
+    def generate_report(self, url: str, create_pdf=None, output_filename="Prospect_Report.pdf"):
+        """Main function to generate the prospect research report."""
+        # Step 1: Scrape the website
+        scraped_data = self.scrape_website(url)
+        if not scraped_data:
+            print("Failed to retrieve content from the website.")
+            return None
         
-        # Year Founded
-        pdf.multi_cell(0, 10, f"Year Founded: {analysis['year_founded']}")
-
-        # Goals
-        pdf.multi_cell(0, 10, f"Goals:\n{'; '.join(analysis['goals'])}")
-
-        # Objectives
-        pdf.multi_cell(0, 10, f"Objectives:\n{'; '.join(analysis['objectives'])}")
-
-        # Innovations
-        pdf.multi_cell(0, 10, f"Innovations:\n{'; '.join(analysis['innovations'])}")
-
-        # Contact Information
-        pdf.multi_cell(0, 10, f"Contact Information: {analysis['contact_info']}")
-
-        pdf.output(output_path)
-
-    def research_prospect(self, url: str, output_path: str):
-        """Main function to orchestrate scraping and report generation."""
+        # Step 2: Summarize the content
+        scraped_data['summarized_content'] = self.summarize_content(scraped_data['content'])
+        print("Summarized content:", scraped_data['summarized_content'])
         
-        content_data, additional_data = self.scrape_website(url)
-        
-        if not content_data or not additional_data:
-            print("Failed to retrieve necessary data.")
-            return
-        
-        analysis_data = {
-           "company_name": content_data["title"] or "Unknown Company",
-           "summary": self.generate_summary(content_data, additional_data),
-           "year_founded": additional_data["year_founded"],
-           "goals": additional_data["goals"],
-           "objectives": additional_data["objectives"],
-           "innovations": additional_data["innovations"],
-           "contact_info": additional_data["contact_info"]
-       }
+        # Step 3: Generate PDF report
+        if create_pdf == "YES":
+            pdf_file = self.create_pdf(scraped_data, filename=output_filename)
+            return pdf_file
 
-        # Generate PDF report
-        self.generate_report(analysis_data, output_path)
-        print(f"Prospect research report generated at {output_path}")
+# Example usage
+researcher = AIProspectResearcher()
+report = researcher.generate_report(input("Enter a website URL: (EXAMPLE==>https://viso.ai/) "), input("If you want to save the report, write YES or press ENTER for pass: "))
 
-# Example usage of the class
-if __name__ == "__main__":
-    researcher = AIProspectResearcher()
-    website_url = "https://viso.ai"  # Replace with target website URL.
-    output_pdf_path = "prospect_research_report.pdf"
-    
-    researcher.research_prospect(website_url, output_pdf_path)
